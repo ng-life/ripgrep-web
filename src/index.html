@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Ripgrep Web · 日志检索</title>
+  <style>
+    :root { --bg:#06111f; --surface:#0a1727; --line:#24364a; --text:#e7edf6; --muted:#8fa2b8; --blue:#2483ff; --cyan:#68b8ff; --red:#ff6565; --amber:#ffbd4a; --radius:7px; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+    button,input,select { font:600 14px/1.3 inherit; }
+    header { height:68px; display:flex; align-items:center; justify-content:space-between; padding:0 30px; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:baseline; gap:14px; } .brand strong { font-size:22px; letter-spacing:-.4px; } .brand span { padding-left:14px; border-left:1px solid #526174; color:#c9d3df; font-size:18px; }
+    .health { display:flex; align-items:center; gap:9px; color:#a9b7c8; font-size:14px; } .health::before { content:""; width:9px; height:9px; border-radius:50%; background:#42ce65; box-shadow:0 0 10px #42ce6555; } .health b { color:#54dc77; }
+    .search-panel { padding:27px 30px 24px; display:grid; grid-template-columns:minmax(160px,.65fr) minmax(260px,1fr) auto auto auto 120px 138px; gap:18px; align-items:end; border-bottom:1px solid var(--line); background:#071422; }
+    label { display:block; margin-bottom:9px; color:#c8d2df; font-size:14px; font-weight:650; }
+    input,select { width:100%; height:48px; padding:0 15px; color:var(--text); background:#0b1726; border:1px solid #496078; border-radius:var(--radius); outline:none; }
+    input:focus,select:focus { border-color:var(--blue); box-shadow:0 0 0 3px #2483ff20; }
+    .switch-field { min-width:78px; } .switch { width:56px; height:30px; position:relative; display:block; }
+    .switch input { opacity:0; width:0; height:0; } .slider { position:absolute; inset:0; border-radius:20px; background:#253449; border:1px solid #405069; cursor:pointer; transition:.2s; }
+    .slider::after { content:""; position:absolute; width:22px; height:22px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+    .switch input:checked + .slider { background:var(--blue); border-color:var(--blue); } .switch input:checked + .slider::after { transform:translateX(26px); }
+    #search-button { height:48px; border:1px solid #4094ff; border-radius:var(--radius); background:var(--blue); color:white; cursor:pointer; font-size:15px; }
+    #search-button:hover { background:#1776eb; } #search-button.cancelling { border-color:#ff7676; background:#bf3f4b; }
+    .summary { min-height:78px; padding:22px 30px 16px; border-bottom:1px solid var(--line); }
+    .summary-line { display:flex; gap:22px; align-items:center; font-weight:650; } .summary strong { color:var(--cyan); } #message { color:var(--muted); font-weight:500; }
+    .progress { height:3px; margin-top:15px; background:#1e3043; overflow:hidden; } .progress span { display:block; height:100%; width:0; background:var(--blue); transition:width .2s; }
+    .progress.loading span { width:35%; animation:load 1.2s ease-in-out infinite; } @keyframes load { 0%{transform:translateX(-110%)} 100%{transform:translateX(310%)} }
+    .results { width:100%; border-collapse:collapse; table-layout:fixed; } th { padding:14px 30px 11px; color:#a7b5c6; text-align:left; font-size:13px; border-bottom:1px solid #192b3e; }
+    th:nth-child(1){width:23%} th:nth-child(2){width:90px} td { padding:10px 30px; border-bottom:1px solid #192b3e; vertical-align:top; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    tbody tr:hover { background:#142439; } .path { color:var(--cyan); overflow-wrap:anywhere; } .number { color:#aebed0; } .line { white-space:pre-wrap; overflow-wrap:anywhere; } mark { padding:0; background:transparent; color:var(--red); font-weight:800; }
+    .empty { padding:80px 30px; text-align:center; color:var(--muted); } .empty strong { display:block; margin-bottom:8px; color:#c7d1dd; font-size:17px; }
+    .footer-note { padding:18px 30px 28px; text-align:center; color:#6f8399; font-size:12px; }
+    @media (max-width:900px) { header{padding:0 18px}.search-panel{padding:20px 18px;grid-template-columns:1fr 1fr}.query-field{grid-column:1/-1}.summary{padding-inline:18px} th,td{padding-inline:14px} th:nth-child(1){width:34%}.brand span{display:none} }
+    @media (max-width:600px) { .search-panel{grid-template-columns:1fr 1fr;gap:16px 12px}.path-field,.query-field,.limit-field,#search-button{grid-column:1/-1}.health span{display:none}.results th:nth-child(1),.results td:nth-child(1){display:none}.results th:nth-child(2){width:64px}.summary-line{flex-wrap:wrap;gap:8px 16px} }
+    @media (prefers-reduced-motion:reduce) { * { animation:none!important; transition:none!important; } }
+  </style>
+</head>
+<body>
+  <header><div class="brand"><strong>Ripgrep Web</strong><span>日志检索</span></div><div class="health"><span>服务状态：</span><b>运行中</b></div></header>
+  <form id="search-form" class="search-panel">
+    <div class="path-field"><label for="path">日志目录</label><input id="path" name="path" autocomplete="off" placeholder="相对根目录，如 nginx/"></div>
+    <div class="query-field"><label for="keyword">关键词或正则表达式</label><input id="keyword" name="keyword" required maxlength="4096" autocomplete="off" placeholder="error|exception|failed"></div>
+    <div class="switch-field"><label for="regex">正则</label><label class="switch"><input id="regex" type="checkbox"><span class="slider"></span></label></div>
+    <div class="switch-field"><label for="case-sensitive">区分大小写</label><label class="switch"><input id="case-sensitive" type="checkbox"><span class="slider"></span></label></div>
+    <div class="switch-field"><label for="search-zip">压缩文件 (-z)</label><label class="switch"><input id="search-zip" type="checkbox"><span class="slider"></span></label></div>
+    <div class="limit-field"><label for="limit">最大结果</label><select id="limit"><option>100</option><option>500</option><option selected>1000</option><option>2000</option></select></div>
+    <button id="search-button" type="submit">开始检索</button>
+  </form>
+  <section class="summary" aria-live="polite"><div class="summary-line"><span>找到 <strong id="count">0</strong> 条匹配</span><span>耗时 <strong id="elapsed">—</strong></span><span id="message">输入关键词开始检索</span></div><div id="progress" class="progress"><span></span></div></section>
+  <main><table class="results"><thead><tr><th>文件路径</th><th>行号</th><th>日志内容</th></tr></thead><tbody id="result-body"></tbody></table><div id="empty" class="empty"><strong>等待检索</strong>结果将在这里按文件和行号显示</div><div id="footer-note" class="footer-note"></div></main>
+  <script>
+    const form=document.querySelector('#search-form'), body=document.querySelector('#result-body'), empty=document.querySelector('#empty'), button=document.querySelector('#search-button'), progress=document.querySelector('#progress');
+    const count=document.querySelector('#count'), elapsed=document.querySelector('#elapsed'), message=document.querySelector('#message'), footer=document.querySelector('#footer-note');
+    const text=(tag,value,className)=>{const node=document.createElement(tag);node.textContent=value;if(className)node.className=className;return node};
+    function highlightedLine(value,ranges){const cell=text('td','', 'line'),bytes=new TextEncoder().encode(value),decoder=new TextDecoder();let cursor=0;for(const range of ranges){cell.append(document.createTextNode(decoder.decode(bytes.slice(cursor,range.start))));cell.append(text('mark',decoder.decode(bytes.slice(range.start,range.end))));cursor=range.end}cell.append(document.createTextNode(decoder.decode(bytes.slice(cursor))));return cell}
+    function appendResult(item){const row=document.createElement('tr');row.append(text('td',item.path,'path'),text('td',String(item.line_number),'number'),highlightedLine(item.line,item.submatches));body.append(row);empty.hidden=true}
+    function parseEvent(block){let event='message',data='';for(const line of block.split(/\r?\n/)){if(line.startsWith('event:'))event=line.slice(6).trim();else if(line.startsWith('data:'))data+=(data?'\n':'')+line.slice(5).trimStart()}return {event,data}}
+    async function consumeSse(response,onEvent){if(!response.ok){const data=await response.json();throw new Error(data.error||'请求失败')}if(!response.body)throw new Error('浏览器不支持流式响应');const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const {value,done}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});let boundary;while((boundary=buffer.search(/\r?\n\r?\n/))>=0){const block=buffer.slice(0,boundary);buffer=buffer.slice(boundary+(/\r\n\r\n/.test(buffer.slice(boundary,boundary+4))?4:2));if(block&&!block.startsWith(':'))onEvent(parseEvent(block))}if(done)break}}
+    let activeController=null;
+    form.addEventListener('submit',async event=>{event.preventDefault();if(activeController){activeController.abort();return}const params=new URLSearchParams({keyword:document.querySelector('#keyword').value,path:document.querySelector('#path').value,regex:document.querySelector('#regex').checked,case_sensitive:document.querySelector('#case-sensitive').checked,search_zip:document.querySelector('#search-zip').checked,limit:document.querySelector('#limit').value});const controller=new AbortController();activeController=controller;button.textContent='中止检索';button.classList.add('cancelling');progress.classList.add('loading');message.textContent='正在接收实时日志';footer.textContent='';body.replaceChildren();empty.hidden=false;empty.innerHTML='<strong>检索中</strong>匹配结果将实时追加';count.textContent='0';elapsed.textContent='—';let received=0;try{const response=await fetch('/api/search?'+params,{signal:controller.signal,headers:{Accept:'text/event-stream'}});await consumeSse(response,({event,data})=>{const payload=JSON.parse(data);if(event==='match'){appendResult(payload);received++;count.textContent=String(received)}else if(event==='done'){count.textContent=String(payload.count);elapsed.textContent=payload.elapsed_ms+' ms';message.textContent=payload.truncated?'已达到结果上限':'检索完成';footer.textContent=payload.truncated?'结果已截断，请缩小路径或关键词范围':'已显示全部匹配结果';if(!payload.count){empty.hidden=false;empty.innerHTML='<strong>没有找到匹配</strong>请调整关键词、路径或检索选项'}}else if(event==='error')throw new Error(payload.error)})}catch(error){if(error.name==='AbortError'){message.textContent='检索已中止';footer.textContent=`已保留 ${received} 条已接收结果`;if(!received){empty.hidden=false;empty.innerHTML='<strong>检索已中止</strong>没有接收到匹配结果'}}else{empty.hidden=received>0;if(!received){empty.innerHTML='';empty.append(text('strong','检索失败'),document.createTextNode(error.message))}message.textContent='请求未完成';footer.textContent=error.message}}finally{if(activeController===controller){activeController=null;button.textContent='开始检索';button.classList.remove('cancelling');progress.classList.remove('loading')}}});
+  </script>
+</body>
+</html>

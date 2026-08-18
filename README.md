@@ -1,0 +1,74 @@
+# Ripgrep Web
+
+轻量级 B/S 日志检索服务。后端使用 ripgrep 官方代码库中的 `grep-regex`、`grep-searcher` 与 `ignore` crates 在进程内完成目录遍历和检索，不执行 shell，也不依赖服务器预装 `rg`。前端通过 `include_str!` 嵌入二进制。
+
+## 功能
+
+- 字面量或正则表达式检索、大小写选项、全局结果上限
+- SSE 实时流式返回，浏览器可中止检索并保留已经接收的结果
+- 可选的 `-z/--search-zip` 风格压缩日志检索：ZIP 成员及 `.gz`、`.bz2`、`.xz/.lzma`、`.zst` 文件
+- 文件路径、行号和 UTF-8 字节级匹配范围（前端精准高亮）
+- canonicalize 后的日志根目录白名单校验，可阻止目录穿越和符号链接逃逸
+- 并发检索信号量、30 秒请求超时、二进制文件跳过
+- `/healthz` 健康检查、gzip、请求日志、优雅退出
+- 单个 release 二进制和加固的 systemd 服务配置
+
+## 本地运行
+
+```bash
+LOG_BASE_DIR=/var/log LISTEN_ADDR=127.0.0.1:5000 cargo run --release
+```
+
+打开 <http://127.0.0.1:5000>。路径输入框只接受 `LOG_BASE_DIR` 下的相对路径；留空表示搜索整个根目录。
+
+配置项：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LOG_BASE_DIR` | `/var/log` | 允许检索的根目录，启动时必须存在 |
+| `LISTEN_ADDR` | `0.0.0.0:5000` | HTTP 监听地址 |
+| `MAX_CONCURRENT_SEARCHES` | `4` | 同时运行的检索任务数 |
+| `RUST_LOG` | `ripgrep_web=info,tower_http=info` | 日志过滤器 |
+
+## 构建与验证
+
+```bash
+cargo fmt --check
+cargo test
+cargo build --release
+```
+
+产物为 `target/release/ripgrep-web`。它是单文件应用，但默认 Linux GNU 构建仍会动态链接系统 libc；若需要跨发行版的真正静态二进制，请使用 musl target 构建。
+
+## systemd 部署
+
+推荐创建只读服务账号，而不是使用 root：
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ripgrep-web
+sudo install -m 0755 target/release/ripgrep-web /usr/local/bin/ripgrep-web
+sudo install -m 0644 deploy/ripgrep-web.service /etc/systemd/system/ripgrep-web.service
+sudo usermod -aG adm ripgrep-web   # Debian/Ubuntu；按实际日志权限调整
+sudo systemctl daemon-reload
+sudo systemctl enable --now ripgrep-web
+sudo systemctl status ripgrep-web
+sudo journalctl -u ripgrep-web.service -f
+```
+
+服务模板默认监听 `0.0.0.0:5000`。这会允许网络访问；生产环境请使用防火墙限制来源，或通过带 TLS 和认证的反向代理暴露，不要把未认证的日志检索接口直接开放到公网。
+
+## API
+
+```text
+GET /api/search?keyword=error&path=nginx&regex=false&case_sensitive=false&search_zip=true&limit=1000
+```
+
+响应类型为 `text/event-stream`：
+
+- `match`：单条结果，包含 `path`、`line_number`、`line` 与 `submatches`
+- `done`：检索汇总，包含 `count`、`truncated` 和 `elapsed_ms`
+- `error`：流建立后的检索错误
+
+客户端断开或使用 `AbortController.abort()` 中止请求后，服务端会停止扫描。
+
+启用 `search_zip` 后，ZIP 归档内的结果路径显示为 `archive.zip!成员路径`。压缩内容只在内存中流式解码，不写入磁盘；每个压缩文件或 ZIP 成员最多读取 256 MiB，以降低压缩炸弹风险。
