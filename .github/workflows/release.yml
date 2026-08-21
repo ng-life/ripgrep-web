@@ -45,7 +45,7 @@ jobs:
           install -m 0644 deploy/ripgrep-web.service "dist/${package}/ripgrep-web.service"
           install -m 0644 README.md "dist/${package}/README.md"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          sha256sum "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+          (cd dist && sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256")
           rm -rf "dist/${package}"
 
       - name: Create GitHub Release
