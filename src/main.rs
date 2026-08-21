@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
@@ -55,6 +55,8 @@ struct SearchQuery {
     case_sensitive: bool,
     #[serde(default)]
     search_zip: bool,
+    #[serde(default)]
+    changed_within: String,
     limit: Option<usize>,
 }
 
@@ -96,6 +98,8 @@ enum AppError {
     InvalidPath,
     #[error("正则表达式无效: {0}")]
     InvalidRegex(String),
+    #[error("修改时间范围无效: {0}（示例：10min、2h、1d、2weeks）")]
+    InvalidDuration(String),
     #[error("检索执行失败: {0}")]
     Search(String),
     #[error("检索超时（最长 30 秒）")]
@@ -110,7 +114,8 @@ impl IntoResponse for AppError {
             Self::EmptyKeyword
             | Self::PatternTooLong
             | Self::InvalidPath
-            | Self::InvalidRegex(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidRegex(_)
+            | Self::InvalidDuration(_) => StatusCode::BAD_REQUEST,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Search(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -184,6 +189,7 @@ async fn search_handler(
     let target = resolve_target(&state.base_dir, &query.path)?;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, HARD_LIMIT);
     let matcher = build_matcher(&query.keyword, query.regex, query.case_sensitive)?;
+    let changed_after = parse_changed_within(&query.changed_within)?;
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     let cancelled = Arc::new(AtomicBool::new(false));
     let slots = Arc::clone(&state.search_slots);
@@ -206,6 +212,7 @@ async fn search_handler(
                 matcher,
                 limit,
                 query.search_zip,
+                changed_after,
                 &blocking_cancelled,
                 |item| {
                     serde_json::to_string(&item).is_ok_and(|data| {
@@ -295,11 +302,25 @@ fn build_matcher(
         .map_err(|error| AppError::InvalidRegex(error.to_string()))
 }
 
+fn parse_changed_within(value: &str) -> Result<Option<SystemTime>, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let duration = humantime::parse_duration(value)
+        .map_err(|_| AppError::InvalidDuration(value.to_owned()))?;
+    SystemTime::now()
+        .checked_sub(duration)
+        .map(Some)
+        .ok_or_else(|| AppError::InvalidDuration(value.to_owned()))
+}
+
 fn stream_search_logs<F>(
     target: &Path,
     matcher: RegexMatcher,
     limit: usize,
     search_zip: bool,
+    changed_after: Option<SystemTime>,
     cancelled: &AtomicBool,
     mut emit: F,
 ) -> Result<SearchOutcome, AppError>
@@ -333,6 +354,15 @@ where
         };
         let path = entry.path();
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if changed_after.is_some_and(|cutoff| {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .is_none_or(|modified| modified <= cutoff)
+        }) {
             continue;
         }
 
@@ -570,12 +600,19 @@ mod tests {
         let root = temp_fixture();
         let matcher = build_matcher("failed", false, true).unwrap();
         let mut found = Vec::new();
-        let outcome =
-            stream_search_logs(&root, matcher, 20, false, &AtomicBool::new(false), |item| {
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            false,
+            None,
+            &AtomicBool::new(false),
+            |item| {
                 found.push(item);
                 true
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(outcome.count, 2);
         assert_eq!(found[0].line_number, 2);
@@ -588,12 +625,19 @@ mod tests {
         let root = temp_fixture();
         let matcher = build_matcher("error|ready", true, false).unwrap();
         let mut found = Vec::new();
-        let outcome =
-            stream_search_logs(&root, matcher, 20, false, &AtomicBool::new(false), |item| {
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            false,
+            None,
+            &AtomicBool::new(false),
+            |item| {
                 found.push(item);
                 true
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(outcome.count, 3);
         fs::remove_dir_all(root).unwrap();
     }
@@ -613,12 +657,19 @@ mod tests {
         let root = temp_fixture();
         let matcher = build_matcher("failed", false, false).unwrap();
         let mut found = Vec::new();
-        let outcome =
-            stream_search_logs(&root, matcher, 1, false, &AtomicBool::new(false), |item| {
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            1,
+            false,
+            None,
+            &AtomicBool::new(false),
+            |item| {
                 found.push(item);
                 true
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(outcome.count, 1);
         assert!(outcome.truncated);
         fs::remove_dir_all(root).unwrap();
@@ -629,7 +680,8 @@ mod tests {
         let root = temp_fixture();
         let matcher = build_matcher("failed", false, false).unwrap();
         let cancelled = AtomicBool::new(false);
-        let outcome = stream_search_logs(&root, matcher, 20, false, &cancelled, |_| false).unwrap();
+        let outcome =
+            stream_search_logs(&root, matcher, 20, false, None, &cancelled, |_| false).unwrap();
         assert!(outcome.cancelled);
         assert_eq!(outcome.count, 0);
         fs::remove_dir_all(root).unwrap();
@@ -654,20 +706,34 @@ mod tests {
 
         let matcher = build_matcher("zip-search-marker", false, true).unwrap();
         let mut found = Vec::new();
-        let outcome =
-            stream_search_logs(&root, matcher, 20, true, &AtomicBool::new(false), |item| {
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            true,
+            None,
+            &AtomicBool::new(false),
+            |item| {
                 found.push(item);
                 true
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(outcome.count, 1);
         assert!(found[0].path.ends_with("archived-logs.zip!logs/app.log"));
         assert_eq!(found[0].line_number, 2);
 
         let matcher = build_matcher("zip-search-marker", false, true).unwrap();
-        let disabled =
-            stream_search_logs(&root, matcher, 20, false, &AtomicBool::new(false), |_| true)
-                .unwrap();
+        let disabled = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            false,
+            None,
+            &AtomicBool::new(false),
+            |_| true,
+        )
+        .unwrap();
         assert_eq!(disabled.count, 0);
         fs::remove_dir_all(root).unwrap();
     }
@@ -687,15 +753,70 @@ mod tests {
 
         let matcher = build_matcher("gzip-marker", false, true).unwrap();
         let mut found = Vec::new();
-        let outcome =
-            stream_search_logs(&root, matcher, 20, true, &AtomicBool::new(false), |item| {
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            true,
+            None,
+            &AtomicBool::new(false),
+            |item| {
                 found.push(item);
                 true
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(outcome.count, 1);
         assert!(found[0].path.ends_with("app.log.gz"));
         assert_eq!(found[0].line_number, 2);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_within_filters_old_files() {
+        use std::fs::FileTimes;
+
+        let root = temp_fixture();
+        let old_path = root.join("old.log");
+        fs::write(&old_path, "ERROR time-filter-marker\n").unwrap();
+        let old_file = File::options().write(true).open(&old_path).unwrap();
+        old_file
+            .set_times(
+                FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(48 * 60 * 60)),
+            )
+            .unwrap();
+        fs::write(root.join("recent.log"), "ERROR time-filter-marker\n").unwrap();
+
+        let matcher = build_matcher("time-filter-marker", false, true).unwrap();
+        let cutoff = SystemTime::now() - Duration::from_secs(60 * 60);
+        let mut found = Vec::new();
+        let outcome = stream_search_logs(
+            &root,
+            matcher,
+            20,
+            false,
+            Some(cutoff),
+            &AtomicBool::new(false),
+            |item| {
+                found.push(item);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.count, 1);
+        assert!(found[0].path.ends_with("recent.log"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_within_duration_parser_accepts_fd_style_values() {
+        assert!(parse_changed_within("").unwrap().is_none());
+        assert!(parse_changed_within("35min").unwrap().is_some());
+        assert!(parse_changed_within("2weeks").unwrap().is_some());
+        assert!(matches!(
+            parse_changed_within("yesterday-ish"),
+            Err(AppError::InvalidDuration(_))
+        ));
     }
 }
