@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Linux x86_64 release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+
+      - name: Validate source
+        run: |
+          cargo fmt --check
+          cargo test --locked --release
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Package release
+        shell: bash
+        run: |
+          package="ripgrep-web-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${package}"
+          install -m 0755 target/release/ripgrep-web "dist/${package}/ripgrep-web"
+          install -m 0644 deploy/ripgrep-web.service "dist/${package}/ripgrep-web.service"
+          install -m 0644 README.md "dist/${package}/README.md"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          sha256sum "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+          rm -rf "dist/${package}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz \
+            dist/*.sha256 \
+            --title "ripgrep-web ${GITHUB_REF_NAME}" \
+            --generate-notes
