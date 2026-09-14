@@ -4,14 +4,28 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and upload"
+        required: true
+        default: "v0.0.1"
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and publish Linux x86_64 release
-    runs-on: ubuntu-24.04
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
 
     steps:
       - name: Check out source
@@ -21,12 +35,14 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
+          rustup target add ${{ matrix.target }}
 
       - name: Verify tag matches Cargo version
         shell: bash
         run: |
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          test "v${version}" = "${GITHUB_REF_NAME}"
+          tag="${{ inputs.tag || github.ref_name }}"
+          test "v${version}" = "${tag}"
 
       - name: Validate source
         run: |
@@ -34,26 +50,54 @@ jobs:
           cargo test --locked --release
 
       - name: Build release binary
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package release
         shell: bash
         run: |
-          package="ripgrep-web-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          package="ripgrep-web-${{ inputs.tag || github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/${package}"
-          install -m 0755 target/release/ripgrep-web "dist/${package}/ripgrep-web"
+          install -m 0755 "target/${{ matrix.target }}/release/ripgrep-web" "dist/${package}/ripgrep-web"
           install -m 0644 deploy/ripgrep-web.service "dist/${package}/ripgrep-web.service"
           install -m 0644 README.md "dist/${package}/README.md"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           (cd dist && sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256")
           rm -rf "dist/${package}"
 
-      - name: Create GitHub Release
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/*.tar.gz \
-            dist/*.sha256 \
-            --title "ripgrep-web ${GITHUB_REF_NAME}" \
-            --generate-notes
+          tag="${{ inputs.tag || github.ref_name }}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/*.tar.gz dist/*.sha256 \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${tag}" \
+              dist/*.tar.gz \
+              dist/*.sha256 \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "ripgrep-web ${tag}" \
+              --generate-notes
+          fi
