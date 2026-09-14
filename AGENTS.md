@@ -29,6 +29,10 @@ LOG_BASE_DIR=/var/log LISTEN_ADDR=127.0.0.1:5000 cargo run --release
 
 提交主题使用简短的祈使句，例如 `Update checkout action to v7` 或 `Make release checksum portable`，并拆分无关改动。拉取请求应说明用户可见或运维层面的影响，列出配置和 API 变更，有关联 issue 时附上链接；涉及界面时提供截图或简短录屏。请求评审前运行上述格式化和测试命令；发布相关改动还应确认标签版本与 `Cargo.toml` 一致。
 
+## 发布后同步 Homebrew Formula
+
+每次 GitHub Release 发布成功后，必须同步检查并更新 [`ng-life/homebrew-personal`](https://github.com/ng-life/homebrew-personal) 中的 `Formula/ripgrep-web.rb`。将 macOS ARM64 和 Linux x86_64 下载地址改为新版本，并用该版本发布产物的 SHA256 校验值更新 Formula；同时检查 `.github/workflows/release.yml` 的 Formula 生成模板和手动触发默认标签，确保后续自动同步不会覆盖这些改动。运行 Ruby 语法及 Homebrew 样式检查，确认 Formula 已推送到 GitHub 且指向本次发布后，才算完成发布。
+
 ## 安全与配置提示
 
 服务会将检索范围限制在 canonicalize 后的 `LOG_BASE_DIR` 内，修改路径处理时必须保留这一边界。不要将未认证接口直接暴露到公网。生产环境应使用只读服务账号，并通过启用 TLS 和认证的反向代理提供访问，具体配置参见 `README.md`。
