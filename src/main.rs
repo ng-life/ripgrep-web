@@ -38,6 +38,14 @@ const MAX_PATTERN_BYTES: usize = 4_096;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+struct ConfigFile {
+    base_dir: Option<String>,
+    listen_addr: Option<String>,
+    max_concurrent_searches: Option<usize>,
+    rust_log: Option<String>,
+}
+
 #[derive(Clone)]
 struct AppState {
     base_dir: Arc<PathBuf>,
@@ -128,25 +136,93 @@ impl IntoResponse for AppError {
     }
 }
 
+fn parse_config_arg<I>(arguments: I) -> Result<Option<PathBuf>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => {
+                let path = arguments
+                    .next()
+                    .ok_or_else(|| "--config 需要指定配置文件路径".to_owned())?;
+                return Ok(Some(PathBuf::from(path)));
+            }
+            value if value.starts_with("--config=") => {
+                return Ok(Some(PathBuf::from(&value["--config=".len()..])));
+            }
+            "--help" | "-h" => {
+                println!("用法: ripgrep-web [--config <配置文件>]");
+                println!("配置项: base_dir, listen_addr, max_concurrent_searches, rust_log");
+                std::process::exit(0);
+            }
+            unexpected => return Err(format!("未知参数: {unexpected}")),
+        }
+    }
+    Ok(None)
+}
+
+fn load_config(path: &Path) -> Result<ConfigFile, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("配置文件 {} 读取失败: {error}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("配置文件 {} 格式无效: {error}", path.display()))
+}
+
+fn setting(config_value: Option<String>, env_name: &str, default_value: &str) -> String {
+    config_value
+        .or_else(|| env::var(env_name).ok())
+        .unwrap_or_else(|| default_value.to_owned())
+}
+
+fn max_concurrent_searches(config_value: Option<usize>) -> usize {
+    let raw = config_value
+        .map(|value| value.to_string())
+        .or_else(|| env::var("MAX_CONCURRENT_SEARCHES").ok())
+        .unwrap_or_else(|| "4".to_owned());
+    raw.parse()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| panic!("MAX_CONCURRENT_SEARCHES 必须是大于 0 的整数: {raw}"))
+}
+
 #[tokio::main]
 async fn main() {
+    let config_path = match parse_config_arg(env::args().skip(1)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("ripgrep-web: {error}");
+            std::process::exit(2);
+        }
+    };
+    let config = match config_path.as_deref().map(load_config).transpose() {
+        Ok(config) => config.unwrap_or_default(),
+        Err(error) => {
+            eprintln!("ripgrep-web: {error}");
+            std::process::exit(2);
+        }
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ripgrep_web=info,tower_http=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                setting(
+                    config.rust_log.clone(),
+                    "RUST_LOG",
+                    "ripgrep_web=info,tower_http=info",
+                )
+                .into()
+            }),
         )
         .init();
 
-    let base_dir = env::var("LOG_BASE_DIR").unwrap_or_else(|_| DEFAULT_BASE_DIR.into());
+    let base_dir = setting(config.base_dir, "LOG_BASE_DIR", DEFAULT_BASE_DIR);
     let base_dir = std::fs::canonicalize(&base_dir)
         .unwrap_or_else(|error| panic!("LOG_BASE_DIR {base_dir:?} 不可访问: {error}"));
-    let listen = env::var("LISTEN_ADDR").unwrap_or_else(|_| DEFAULT_LISTEN.into());
+    let listen = setting(config.listen_addr, "LISTEN_ADDR", DEFAULT_LISTEN);
     let listen: SocketAddr = listen.parse().expect("LISTEN_ADDR 格式无效");
-    let max_concurrent = env::var("MAX_CONCURRENT_SEARCHES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(4);
+    let max_concurrent = max_concurrent_searches(config.max_concurrent_searches);
 
     let state = AppState {
         base_dir: Arc::new(base_dir),
@@ -593,6 +669,30 @@ mod tests {
         )
         .unwrap();
         root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn config_argument_accepts_separate_and_equal_paths() {
+        assert_eq!(
+            parse_config_arg(["--config".to_owned(), "/tmp/app.json".to_owned()]).unwrap(),
+            Some(PathBuf::from("/tmp/app.json"))
+        );
+        assert_eq!(
+            parse_config_arg(["--config=/tmp/app.json".to_owned()]).unwrap(),
+            Some(PathBuf::from("/tmp/app.json"))
+        );
+        assert_eq!(parse_config_arg([]).unwrap(), None);
+        assert!(parse_config_arg(["--unknown".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn config_file_supports_optional_values() {
+        let config: ConfigFile =
+            serde_json::from_str(r#"{"base_dir":"/tmp/logs","max_concurrent_searches":2}"#)
+                .unwrap();
+        assert_eq!(config.base_dir.as_deref(), Some("/tmp/logs"));
+        assert_eq!(config.listen_addr, None);
+        assert_eq!(config.max_concurrent_searches, Some(2));
     }
 
     #[test]

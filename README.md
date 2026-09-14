@@ -2,11 +2,12 @@
 
 轻量级 B/S 日志检索服务。后端使用 ripgrep 官方代码库中的 `grep-regex`、`grep-searcher` 与 `ignore` crates 在进程内完成目录遍历和检索，不执行 shell，也不依赖服务器预装 `rg`。前端通过 `include_str!` 嵌入二进制。
 
-当前版本：`0.0.1`
+当前版本：`0.0.2`
 
 ## 功能
 
 - 字面量或正则表达式检索、大小写选项、全局结果上限
+- `--config` 指定 JSON 配置文件，Homebrew 服务默认使用生成的配置文件
 - SSE 实时流式返回，浏览器可中止检索并保留已经接收的结果
 - 可选的 `-z/--search-zip` 风格压缩日志检索：ZIP 成员及 `.gz`、`.bz2`、`.xz/.lzma`、`.zst` 文件
 - 类似 `fd --changed-within` 的文件修改时间过滤，只检索指定时长内更新的文件
@@ -32,6 +33,28 @@ LOG_BASE_DIR=/var/log LISTEN_ADDR=127.0.0.1:5000 cargo run --release
 | `LISTEN_ADDR` | `0.0.0.0:5000` | HTTP 监听地址 |
 | `MAX_CONCURRENT_SEARCHES` | `4` | 同时运行的检索任务数 |
 | `RUST_LOG` | `ripgrep_web=info,tower_http=info` | 日志过滤器 |
+
+## 配置文件
+
+命令行可通过 `--config` 指定 JSON 配置文件；各字段优先使用配置文件中的值，缺失时依次回退到环境变量和内置默认值（`rust_log` 由 `RUST_LOG` 环境变量优先覆盖）：
+
+```bash
+ripgrep-web --config /etc/ripgrep-web/config.json
+ripgrep-web --config=/etc/ripgrep-web/config.json
+```
+
+配置字段如下：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `base_dir` | `/var/log` | 允许检索的根目录，启动时必须存在 |
+| `listen_addr` | `0.0.0.0:5000` | HTTP 监听地址 |
+| `max_concurrent_searches` | `4` | 同时运行的检索任务数 |
+| `rust_log` | `ripgrep_web=info,tower_http=info` | 日志过滤器，`RUST_LOG` 环境变量优先 |
+
+不传 `--config` 时，服务仍支持 `LOG_BASE_DIR`、`LISTEN_ADDR`、`MAX_CONCURRENT_SEARCHES` 和 `RUST_LOG` 环境变量。
+
+Homebrew 安装时会在 `$(brew --prefix)/etc/ripgrep-web.json` 生成默认配置；`brew services start ng-life/personal/ripgrep-web` 会使用该配置启动服务。升级包不会覆盖已有配置。
 
 ## 构建与验证
 
